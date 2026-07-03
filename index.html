@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>稼働時間自動計算アプリ</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<style>
+  :root{
+    --main:#2563eb; --main-dark:#1d4ed8; --bg:#f4f6fb; --card:#ffffff;
+    --border:#e2e8f0; --text:#1e293b; --sub:#64748b; --err:#dc2626; --warn:#d97706; --ok:#16a34a;
+  }
+  *{box-sizing:border-box;}
+  body{
+    font-family:"Hiragino Kaku Gothic ProN","Yu Gothic",Meiryo,sans-serif;
+    background:var(--bg); color:var(--text); margin:0; padding:24px;
+  }
+  .wrap{max-width:1200px;margin:0 auto;}
+  h1{font-size:22px;margin:0 0 4px;}
+  .sub{color:var(--sub);font-size:13px;margin-bottom:20px;}
+  .card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:20px;margin-bottom:16px;box-shadow:0 1px 2px rgba(0,0,0,.04);}
+  .drop{
+    border:2px dashed #93c5fd; border-radius:12px; padding:36px 20px; text-align:center;
+    background:#f0f6ff; cursor:pointer; transition:.15s;
+  }
+  .drop.drag{background:#dbeafe;border-color:var(--main);}
+  .drop p{margin:6px 0;color:var(--sub);font-size:13px;}
+  .drop .big{font-size:15px;color:var(--main-dark);font-weight:600;}
+  input[type=file]{display:none;}
+  button{
+    background:var(--main); color:#fff; border:none; padding:9px 18px; border-radius:8px;
+    font-size:13px; cursor:pointer; font-weight:600;
+  }
+  button:hover{background:var(--main-dark);}
+  button.secondary{background:#fff;color:var(--main);border:1px solid var(--main);}
+  button.secondary:hover{background:#eff6ff;}
+  button:disabled{background:#cbd5e1;color:#fff;cursor:not-allowed;}
+  .actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:14px;}
+  .msg{padding:10px 14px;border-radius:8px;font-size:13px;margin-top:14px;display:none;}
+  .msg.error{background:#fef2f2;color:var(--err);border:1px solid #fecaca;display:block;}
+  .msg.ok{background:#f0fdf4;color:var(--ok);border:1px solid #bbf7d0;display:block;}
+  .stats{display:flex;gap:14px;flex-wrap:wrap;margin-bottom:6px;}
+  .stat{background:#f8fafc;border:1px solid var(--border);border-radius:10px;padding:10px 16px;min-width:130px;}
+  .stat .n{font-size:20px;font-weight:700;color:var(--main-dark);}
+  .stat .l{font-size:11px;color:var(--sub);}
+  table{border-collapse:collapse;width:100%;font-size:12.5px;}
+  th,td{border:1px solid var(--border);padding:6px 9px;text-align:left;white-space:nowrap;}
+  th{background:#eef2ff;position:sticky;top:0;font-weight:700;}
+  th.j-col,td.j-col{background:#fffbeb;font-weight:700;color:#92400e;}
+  tbody tr:nth-child(even){background:#fafbfc;}
+  .tablewrap{max-height:520px;overflow:auto;border:1px solid var(--border);border-radius:10px;}
+  .flag-error{color:var(--err);font-weight:700;}
+  .flag-warn{color:var(--warn);font-weight:700;}
+  .hint{font-size:12px;color:var(--sub);margin-top:8px;line-height:1.6;}
+  .badge{display:inline-block;background:#eef2ff;color:var(--main-dark);border-radius:6px;padding:2px 8px;font-size:11px;margin-left:6px;}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>稼働時間自動計算アプリ</h1>
+  <div class="sub">出退勤データ(CSV / Excel)をインポートすると、J列に稼働時間(小数点)を自動計算します。</div>
+
+  <div class="card">
+    <div id="drop" class="drop">
+      <div class="big">📂 ここにファイルをドラッグ&ドロップ</div>
+      <p>または</p>
+      <button type="button" id="pickBtn">ファイルを選択</button>
+      <p>対応形式: .csv / .xlsx / .xls</p>
+      <input type="file" id="fileInput" accept=".csv,.xlsx,.xls">
+    </div>
+    <div id="msg" class="msg"></div>
+    <div class="hint">
+      必要な列: 出勤時間・退勤時間・中抜時間・戻り時間（列名で自動検出するため順番が変わっても大丈夫です）<br>
+      計算式: 稼働時間 = (退勤時間 − 出勤時間) − (戻り時間 − 中抜時間)　※中抜けが無ければそのまま退勤−出勤<br>
+      退勤時間が未入力の行は「打刻漏れ」と表示します。
+    </div>
+  </div>
+
+  <div class="card" id="resultCard" style="display:none;">
+    <div class="stats" id="stats"></div>
+    <div class="actions" style="margin-top:0;margin-bottom:14px;">
+      <button id="downloadCsv">CSVでダウンロード</button>
+      <button id="downloadXlsx" class="secondary">Excelでダウンロード(.xlsx)</button>
+    </div>
+    <div class="tablewrap">
+      <table id="resultTable"></table>
+    </div>
+  </div>
+</div>
+
+<script>
+const dropEl = document.getElementById('drop');
+const fileInput = document.getElementById('fileInput');
+const pickBtn = document.getElementById('pickBtn');
+const msgEl = document.getElementById('msg');
+const resultCard = document.getElementById('resultCard');
+const statsEl = document.getElementById('stats');
+const tableEl = document.getElementById('resultTable');
+const downloadCsvBtn = document.getElementById('downloadCsv');
+const downloadXlsxBtn = document.getElementById('downloadXlsx');
+
+let processedAoa = null; // header + rows, J column already appended
+let sourceFileBaseName = 'result';
+
+pickBtn.addEventListener('click', () => fileInput.click());
+fileInput.addEventListener('change', e => { if(e.target.files[0]) handleFile(e.target.files[0]); });
+
+['dragenter','dragover'].forEach(ev => dropEl.addEventListener(ev, e => {
+  e.preventDefault(); dropEl.classList.add('drag');
+}));
+['dragleave','drop'].forEach(ev => dropEl.addEventListener(ev, e => {
+  e.preventDefault(); dropEl.classList.remove('drag');
+}));
+dropEl.addEventListener('drop', e => {
+  const f = e.dataTransfer.files[0];
+  if (f) handleFile(f);
+});
+dropEl.addEventListener('click', (e) => {
+  if (e.target === pickBtn) return;
+  fileInput.click();
+});
+
+function showMsg(text, type){
+  msgEl.textContent = text;
+  msgEl.className = 'msg ' + type;
+}
+function clearMsg(){
+  msgEl.className = 'msg';
+  msgEl.textContent = '';
+}
+
+async function handleFile(file){
+  clearMsg();
+  resultCard.style.display = 'none';
+  sourceFileBaseName = file.name.replace(/\.[^.]+$/, '');
+  const ext = file.name.split('.').pop().toLowerCase();
+  try{
+    let aoa;
+    if (ext === 'csv'){
+      const text = await readFileAsText(file);
+      aoa = parseCSV(text);
+    } else if (ext === 'xlsx' || ext === 'xls'){
+      if (typeof XLSX === 'undefined'){
+        showMsg('Excelファイルの読み込みには通信環境が必要です（初回のみライブラリを読み込みます）。時間をおいて再度お試しください。', 'error');
+        return;
+      }
+      const buf = await file.arrayBuffer();
+      const wb = XLSX.read(buf, {type:'array', cellDates:false});
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      aoa = XLSX.utils.sheet_to_json(ws, {header:1, raw:false, defval:''});
+    } else {
+      showMsg('対応していないファイル形式です（.csv / .xlsx / .xls のみ）', 'error');
+      return;
+    }
+
+    aoa = aoa.filter(r => r.some(c => String(c).trim() !== ''));
+    if (aoa.length < 2){
+      showMsg('データが見つかりませんでした。ファイルの中身を確認してください。', 'error');
+      return;
+    }
+
+    const header = aoa[0].map(h => String(h).trim());
+    const need = ['出勤時間','退勤時間','中抜時間','戻り時間'];
+    const idx = {};
+    header.forEach((h,i) => idx[h] = i);
+    const missing = need.filter(n => !(n in idx));
+    if (missing.length){
+      showMsg('必要な列が見つかりません: ' + missing.join(' / ') + '（列名を確認してください）', 'error');
+      return;
+    }
+
+    let missingClockOut = 0, errorRows = 0, sum = 0, sumCount = 0;
+    const outRows = aoa.slice(1).map(row => {
+      const get = name => (row[idx[name]] !== undefined ? String(row[idx[name]]).trim() : '');
+      const start = parseTimeToMinutes(get('出勤時間'));
+      const end = parseTimeToMinutes(get('退勤時間'));
+      const bOut = parseTimeToMinutes(get('中抜時間'));
+      const bIn = parseTimeToMinutes(get('戻り時間'));
+
+      let j;
+      if (start === null){
+        j = '';
+      } else if (end === null){
+        j = '打刻漏れ'; missingClockOut++;
+      } else {
+        let total = end - start;
+        if (total < 0) total += 1440;
+        let brk = 0;
+        if (bOut !== null && bIn !== null){
+          brk = bIn - bOut;
+          if (brk < 0) brk += 1440;
+        } else if (bOut !== null || bIn !== null){
+          j = '打刻漏れ'; missingClockOut++;
+        }
+        if (j === undefined){
+          const workMin = total - brk;
+          if (workMin < 0){
+            j = 'エラー'; errorRows++;
+          } else {
+            const dec = Math.round((workMin/60)*100)/100;
+            j = Number(dec.toFixed(2));
+            sum += dec; sumCount++;
+          }
+        }
+      }
+      const newRow = row.slice(0, header.length);
+      while (newRow.length < header.length) newRow.push('');
+      newRow.push(j);
+      return newRow;
+    });
+
+    const newHeader = header.slice();
+    newHeader.push('稼働時間');
+    processedAoa = [newHeader, ...outRows];
+
+    renderStats(outRows.length, missingClockOut, errorRows, sum, sumCount);
+    renderTable(newHeader, outRows);
+    resultCard.style.display = 'block';
+    showMsg('取り込み完了：' + outRows.length + ' 件を計算しました。', 'ok');
+  } catch(err){
+    console.error(err);
+    showMsg('読み込み中にエラーが発生しました: ' + err.message, 'error');
+  }
+}
+
+function renderStats(total, missing, errorRows, sum, sumCount){
+  const avg = sumCount ? (sum/sumCount) : 0;
+  statsEl.innerHTML = `
+    <div class="stat"><div class="n">${total}</div><div class="l">対象件数</div></div>
+    <div class="stat"><div class="n">${sum.toFixed(2)}</div><div class="l">合計稼働時間</div></div>
+    <div class="stat"><div class="n">${avg.toFixed(2)}</div><div class="l">平均稼働時間</div></div>
+    <div class="stat"><div class="n" style="color:${missing? 'var(--warn)':'inherit'}">${missing}</div><div class="l">打刻漏れ件数</div></div>
+    <div class="stat"><div class="n" style="color:${errorRows? 'var(--err)':'inherit'}">${errorRows}</div><div class="l">エラー件数</div></div>
+  `;
+}
+
+function renderTable(header, rows){
+  let html = '<thead><tr>';
+  header.forEach((h,i) => {
+    html += `<th${i===header.length-1?' class="j-col"':''}>${escapeHtml(h)}</th>`;
+  });
+  html += '</tr></thead><tbody>';
+  rows.forEach(r => {
+    html += '<tr>';
+    r.forEach((c,i) => {
+      const isLast = i === header.length-1;
+      let cls = isLast ? ' class="j-col' : ' class="';
+      if (isLast && c === '打刻漏れ') cls += ' flag-warn';
+      if (isLast && c === 'エラー') cls += ' flag-error';
+      cls += '"';
+      html += `<td${cls}>${escapeHtml(c===undefined?'':c)}</td>`;
+    });
+    html += '</tr>';
+  });
+  html += '</tbody>';
+  tableEl.innerHTML = html;
+}
+
+function escapeHtml(v){
+  return String(v).replace(/[&<>"']/g, s => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[s]));
+}
+
+function parseTimeToMinutes(str){
+  if (str === null || str === undefined) return null;
+  str = String(str).trim();
+  if (str === '') return null;
+  // Excelのシリアル値(0〜1の小数)が文字列で来た場合
+  if (/^0?\.\d+$/.test(str)){
+    return Math.round(parseFloat(str) * 24 * 60);
+  }
+  const m = str.match(/^(\d{1,2}):(\d{2})/);
+  if (!m) return null;
+  return parseInt(m[1],10) * 60 + parseInt(m[2],10);
+}
+
+async function readFileAsText(file){
+  const buf = await file.arrayBuffer();
+  const bytes = new Uint8Array(buf);
+  let text = new TextDecoder('utf-8', {fatal:false}).decode(bytes);
+  const bad = (text.match(/�/g) || []).length;
+  if (bad > 0 && bad > text.length * 0.005){
+    try { text = new TextDecoder('shift_jis').decode(bytes); } catch(e){}
+  }
+  if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
+  return text;
+}
+
+function parseCSV(text){
+  const rows = [];
+  let row = [], field = '', inQuotes = false;
+  for (let i = 0; i < text.length; i++){
+    const c = text[i];
+    if (inQuotes){
+      if (c === '"'){
+        if (text[i+1] === '"'){ field += '"'; i++; }
+        else inQuotes = false;
+      } else field += c;
+    } else {
+      if (c === '"') inQuotes = true;
+      else if (c === ','){ row.push(field); field=''; }
+      else if (c === '\n'){ row.push(field); rows.push(row); row=[]; field=''; }
+      else if (c === '\r'){ /* skip */ }
+      else field += c;
+    }
+  }
+  if (field.length > 0 || row.length > 0){ row.push(field); rows.push(row); }
+  return rows;
+}
+
+function toCsvValue(v){
+  const s = v === undefined || v === null ? '' : String(v);
+  if (/[",\n]/.test(s)) return '"' + s.replace(/"/g,'""') + '"';
+  return s;
+}
+
+downloadCsvBtn.addEventListener('click', () => {
+  if (!processedAoa) return;
+  const csv = processedAoa.map(r => r.map(toCsvValue).join(',')).join('\r\n');
+  const blob = new Blob(['﻿' + csv], {type:'text/csv;charset=utf-8;'});
+  triggerDownload(blob, sourceFileBaseName + '_稼働時間計算済.csv');
+});
+
+downloadXlsxBtn.addEventListener('click', () => {
+  if (!processedAoa) return;
+  if (typeof XLSX === 'undefined'){
+    showMsg('Excel出力には通信環境が必要です。CSVでダウンロードをご利用ください。', 'error');
+    return;
+  }
+  const ws = XLSX.utils.aoa_to_sheet(processedAoa);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'data');
+  XLSX.writeFile(wb, sourceFileBaseName + '_稼働時間計算済.xlsx');
+});
+
+function triggerDownload(blob, filename){
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+</script>
+</body>
+</html>
