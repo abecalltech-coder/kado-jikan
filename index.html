@@ -52,6 +52,26 @@
     font-family:inherit;
   }
   .filter-item select:focus, .filter-item input[type=text]:focus{outline:2px solid #bfdbfe;border-color:var(--main);}
+  .name-filter{position:relative;}
+  .name-filter-btn{
+    padding:7px 10px;border:1px solid var(--border);border-radius:8px;font-size:13px;background:#fff;color:var(--text);
+    cursor:pointer;text-align:left;min-width:160px;font-weight:400;
+  }
+  .name-filter-btn:hover{background:#f8fafc;}
+  .name-panel{
+    position:absolute;top:calc(100% + 6px);left:0;z-index:20;background:#fff;border:1px solid var(--border);
+    border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.12);width:240px;padding:10px;
+  }
+  .name-panel input[type=text]{
+    width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;font-size:12.5px;margin-bottom:8px;font-family:inherit;
+  }
+  .name-panel-actions{display:flex;gap:6px;margin-bottom:8px;}
+  .name-panel-actions button{padding:4px 10px;font-size:11px;}
+  .name-checkbox-list{max-height:220px;overflow:auto;border-top:1px solid var(--border);padding-top:6px;}
+  .name-item{display:flex;align-items:center;gap:6px;padding:4px 2px;font-size:12.5px;cursor:pointer;border-radius:4px;}
+  .name-item:hover{background:#f1f5f9;}
+  .name-item input{cursor:pointer;}
+  .name-empty{font-size:12px;color:var(--sub);padding:8px 2px;}
   table{border-collapse:collapse;width:100%;font-size:12.5px;}
   th,td{border:1px solid var(--border);padding:6px 9px;text-align:left;white-space:nowrap;}
   th{background:#eef2ff;position:sticky;top:0;font-weight:700;}
@@ -94,9 +114,17 @@
         <label for="filterDate">日付</label>
         <select id="filterDate"><option value="">すべて</option></select>
       </div>
-      <div class="filter-item">
-        <label for="filterName">氏名</label>
-        <input type="text" id="filterName" placeholder="氏名で検索">
+      <div class="filter-item name-filter">
+        <label for="nameFilterBtn">氏名</label>
+        <button type="button" id="nameFilterBtn" class="name-filter-btn">すべて</button>
+        <div id="nameFilterPanel" class="name-panel" style="display:none;">
+          <input type="text" id="nameFilterSearch" placeholder="名前で絞り込み検索">
+          <div class="name-panel-actions">
+            <button type="button" id="nameSelectAll" class="secondary">全選択</button>
+            <button type="button" id="nameSelectNone" class="secondary">解除</button>
+          </div>
+          <div id="nameCheckboxList" class="name-checkbox-list"></div>
+        </div>
       </div>
       <div class="filter-item">
         <label for="filterCompany">所属会社</label>
@@ -127,15 +155,22 @@ const tableEl = document.getElementById('resultTable');
 const downloadCsvBtn = document.getElementById('downloadCsv');
 const downloadXlsxBtn = document.getElementById('downloadXlsx');
 const filterDateEl = document.getElementById('filterDate');
-const filterNameEl = document.getElementById('filterName');
 const filterCompanyEl = document.getElementById('filterCompany');
 const resetFiltersBtn = document.getElementById('resetFilters');
+const nameFilterBtn = document.getElementById('nameFilterBtn');
+const nameFilterPanel = document.getElementById('nameFilterPanel');
+const nameFilterSearch = document.getElementById('nameFilterSearch');
+const nameSelectAllBtn = document.getElementById('nameSelectAll');
+const nameSelectNoneBtn = document.getElementById('nameSelectNone');
+const nameCheckboxList = document.getElementById('nameCheckboxList');
 
 let currentHeader = null;   // ヘッダー配列(稼働時間列を含む)
 let allRows = [];           // インポートした全行(フィルタ前)
 let filteredRows = [];      // 現在表示中(フィルタ後)の行
 let colIdx = {};            // 列名 -> インデックス
 let sourceFileBaseName = 'result';
+let allNames = [];          // インポートした全氏名(重複なし)
+let selectedNames = new Set(); // 選択中の氏名(空 = 全員)
 
 pickBtn.addEventListener('click', () => fileInput.click());
 fileInput.addEventListener('change', e => { if(e.target.files[0]) handleFile(e.target.files[0]); });
@@ -157,13 +192,72 @@ dropEl.addEventListener('click', (e) => {
 
 filterDateEl.addEventListener('change', applyFilters);
 filterCompanyEl.addEventListener('change', applyFilters);
-filterNameEl.addEventListener('input', applyFilters);
 resetFiltersBtn.addEventListener('click', () => {
   filterDateEl.value = '';
   filterCompanyEl.value = '';
-  filterNameEl.value = '';
+  selectedNames.clear();
+  renderNameCheckboxes();
+  updateNameButtonLabel();
   applyFilters();
 });
+
+nameFilterBtn.addEventListener('click', (e) => {
+  e.stopPropagation();
+  nameFilterPanel.style.display = (nameFilterPanel.style.display === 'none') ? 'block' : 'none';
+});
+document.addEventListener('click', (e) => {
+  if (nameFilterPanel.style.display !== 'none' && !nameFilterPanel.contains(e.target) && e.target !== nameFilterBtn){
+    nameFilterPanel.style.display = 'none';
+  }
+});
+nameFilterSearch.addEventListener('input', () => {
+  const q = nameFilterSearch.value.trim().toLowerCase();
+  nameCheckboxList.querySelectorAll('.name-item').forEach(el => {
+    const name = (el.dataset.name || '').toLowerCase();
+    el.style.display = name.includes(q) ? '' : 'none';
+  });
+});
+nameSelectAllBtn.addEventListener('click', () => {
+  allNames.forEach(n => selectedNames.add(n));
+  renderNameCheckboxes();
+  updateNameButtonLabel();
+  applyFilters();
+});
+nameSelectNoneBtn.addEventListener('click', () => {
+  selectedNames.clear();
+  renderNameCheckboxes();
+  updateNameButtonLabel();
+  applyFilters();
+});
+
+function renderNameCheckboxes(){
+  if (allNames.length === 0){
+    nameCheckboxList.innerHTML = '<div class="name-empty">氏名データがありません</div>';
+    return;
+  }
+  nameCheckboxList.innerHTML = allNames.map(n => {
+    const checked = selectedNames.has(n) ? 'checked' : '';
+    return `<label class="name-item" data-name="${escapeHtml(n)}"><input type="checkbox" value="${escapeHtml(n)}" ${checked}> ${escapeHtml(n)}</label>`;
+  }).join('');
+  nameCheckboxList.querySelectorAll('input[type=checkbox]').forEach(cb => {
+    cb.addEventListener('change', () => {
+      if (cb.checked) selectedNames.add(cb.value);
+      else selectedNames.delete(cb.value);
+      updateNameButtonLabel();
+      applyFilters();
+    });
+  });
+}
+
+function updateNameButtonLabel(){
+  if (selectedNames.size === 0){
+    nameFilterBtn.textContent = 'すべて';
+  } else if (selectedNames.size === 1){
+    nameFilterBtn.textContent = Array.from(selectedNames)[0];
+  } else {
+    nameFilterBtn.textContent = selectedNames.size + '名を選択中';
+  }
+}
 
 function showMsg(text, type){
   msgEl.textContent = text;
@@ -261,9 +355,9 @@ async function handleFile(file){
     newHeader.forEach((h,i) => colIdx[h] = i);
 
     populateFilterOptions();
-    filterNameEl.value = '';
     filterDateEl.value = '';
     filterCompanyEl.value = '';
+    nameFilterPanel.style.display = 'none';
     applyFilters();
 
     resultCard.style.display = 'block';
@@ -302,7 +396,20 @@ function populateFilterOptions(){
     filterCompanyEl.parentElement.style.display = 'none';
   }
 
-  filterNameEl.parentElement.style.display = (colIdx['氏名'] !== undefined) ? '' : 'none';
+  const nameIdx = colIdx['氏名'];
+  if (nameIdx !== undefined){
+    allNames = Array.from(new Set(allRows.map(r => String(r[nameIdx]||'').trim()).filter(v=>v!=='')));
+    allNames.sort((a,b) => a.localeCompare(b, 'ja'));
+    selectedNames = new Set();
+    nameFilterSearch.value = '';
+    renderNameCheckboxes();
+    updateNameButtonLabel();
+    document.querySelector('.name-filter').style.display = '';
+  } else {
+    allNames = [];
+    selectedNames = new Set();
+    document.querySelector('.name-filter').style.display = 'none';
+  }
 }
 
 function applyFilters(){
@@ -312,13 +419,12 @@ function applyFilters(){
   const companyIdx = colIdx['所属会社'];
 
   const dateVal = filterDateEl.value;
-  const nameVal = filterNameEl.value.trim().toLowerCase();
   const companyVal = filterCompanyEl.value;
 
   filteredRows = allRows.filter(row => {
     if (dateVal && dateIdx !== undefined && String(row[dateIdx]||'').trim() !== dateVal) return false;
     if (companyVal && companyIdx !== undefined && String(row[companyIdx]||'').trim() !== companyVal) return false;
-    if (nameVal && nameIdx !== undefined && !String(row[nameIdx]||'').toLowerCase().includes(nameVal)) return false;
+    if (selectedNames.size > 0 && nameIdx !== undefined && !selectedNames.has(String(row[nameIdx]||'').trim())) return false;
     return true;
   });
 
