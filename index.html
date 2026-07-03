@@ -76,6 +76,7 @@
   th,td{border:1px solid var(--border);padding:6px 9px;text-align:left;white-space:nowrap;}
   th{background:#eef2ff;position:sticky;top:0;font-weight:700;}
   th.j-col,td.j-col{background:#fffbeb;font-weight:700;color:#92400e;}
+  th.ot-col,td.ot-col{background:#fef2f2;font-weight:700;color:#b91c1c;}
   tbody tr:nth-child(even){background:#fafbfc;}
   .tablewrap{max-height:520px;overflow:auto;border:1px solid var(--border);border-radius:10px;}
   .flag-error{color:var(--err);font-weight:700;}
@@ -101,7 +102,8 @@
     <div id="msg" class="msg"></div>
     <div class="hint">
       必要な列: 出勤時間・退勤時間・中抜時間・戻り時間（列名で自動検出するため順番が変わっても大丈夫です）<br>
-      計算式: 稼働時間 = (退勤時間 − 出勤時間) − (戻り時間 − 中抜時間)　※中抜けが無ければそのまま退勤−出勤<br>
+      稼働時間: 10:00より前の出勤は10:00扱い、19:00より後の退勤は19:00扱いで計算します。中抜け時間を差し引き、休憩時間(13:00〜14:00)に稼働している場合はさらに1時間差し引きます。<br>
+      残業時間: 19:00以降に打刻された時間を、稼働時間の右の列に別途表示します。<br>
       退勤時間が未入力の行は「打刻漏れ」と表示します。
     </div>
   </div>
@@ -315,39 +317,18 @@ async function handleFile(file){
       const bOut = parseTimeToMinutes(get('中抜時間'));
       const bIn = parseTimeToMinutes(get('戻り時間'));
 
-      let j;
-      if (start === null){
-        j = '';
-      } else if (end === null){
-        j = '打刻漏れ';
-      } else {
-        let total = end - start;
-        if (total < 0) total += 1440;
-        let brk = 0;
-        if (bOut !== null && bIn !== null){
-          brk = bIn - bOut;
-          if (brk < 0) brk += 1440;
-        } else if (bOut !== null || bIn !== null){
-          j = '打刻漏れ';
-        }
-        if (j === undefined){
-          const workMin = total - brk;
-          if (workMin < 0){
-            j = 'エラー';
-          } else {
-            const dec = Math.round((workMin/60)*100)/100;
-            j = Number(dec.toFixed(2));
-          }
-        }
-      }
+      const { work, overtime } = computeWorkAndOvertime(start, end, bOut, bIn);
+
       const newRow = row.slice(0, header.length);
       while (newRow.length < header.length) newRow.push('');
-      newRow.push(j);
+      newRow.push(work);
+      newRow.push(overtime);
       return newRow;
     });
 
     const newHeader = header.slice();
     newHeader.push('稼働時間');
+    newHeader.push('残業時間');
 
     currentHeader = newHeader;
     allRows = outRows;
@@ -366,6 +347,62 @@ async function handleFile(file){
     console.error(err);
     showMsg('読み込み中にエラーが発生しました: ' + err.message, 'error');
   }
+}
+
+const MORNING_CUTOFF = 600;   // 10:00 これより前の出勤は10:00扱い
+const EVENING_CUTOFF = 1140;  // 19:00 これより後の退勤は19:00扱い(超過分は残業時間)
+const LUNCH_START = 780;      // 13:00
+const LUNCH_END = 840;        // 14:00
+
+function toDecimalHours(minutes){
+  return Number((Math.round((minutes/60)*100)/100).toFixed(2));
+}
+
+function computeWorkAndOvertime(start, end, bOut, bIn){
+  if (start === null){
+    return { work: '', overtime: '' };
+  }
+  if (end === null){
+    return { work: '打刻漏れ', overtime: '打刻漏れ' };
+  }
+  if (end < start){
+    return { work: 'エラー', overtime: 'エラー' };
+  }
+
+  const overtime = toDecimalHours(Math.max(0, end - EVENING_CUTOFF));
+
+  const effStart = Math.max(start, MORNING_CUTOFF);
+  const effEnd = Math.min(end, EVENING_CUTOFF);
+  let workMinutes = Math.max(0, effEnd - effStart);
+
+  const hasBout = bOut !== null;
+  const hasBin = bIn !== null;
+
+  if (hasBout !== hasBin){
+    // 中抜時間・戻り時間の片方だけ入力されている(不整合)
+    return { work: '打刻漏れ', overtime };
+  }
+
+  let lunchCovered = false;
+  if (hasBout && hasBin){
+    if (bIn < bOut){
+      return { work: 'エラー', overtime };
+    }
+    const clampedBs = Math.max(bOut, effStart);
+    const clampedBe = Math.min(bIn, effEnd);
+    const breakMinutes = Math.max(0, clampedBe - clampedBs);
+    workMinutes -= breakMinutes;
+    if (bOut <= LUNCH_START && bIn >= LUNCH_END) lunchCovered = true;
+  }
+
+  if (!lunchCovered){
+    const overlapStart = Math.max(effStart, LUNCH_START);
+    const overlapEnd = Math.min(effEnd, LUNCH_END);
+    if (overlapEnd > overlapStart) workMinutes -= 60;
+  }
+
+  workMinutes = Math.max(0, workMinutes);
+  return { work: toDecimalHours(workMinutes), overtime };
 }
 
 function dateSortKey(s){
@@ -428,25 +465,29 @@ function applyFilters(){
     return true;
   });
 
-  let missingClockOut = 0, errorRows = 0, sum = 0, sumCount = 0;
-  const jIdx = currentHeader.length - 1;
+  let missingClockOut = 0, errorRows = 0, sum = 0, sumCount = 0, otSum = 0;
+  const jIdx = currentHeader.length - 2;
+  const otIdx = currentHeader.length - 1;
   filteredRows.forEach(r => {
     const v = r[jIdx];
     if (v === '打刻漏れ') missingClockOut++;
     else if (v === 'エラー') errorRows++;
     else if (typeof v === 'number'){ sum += v; sumCount++; }
+    const ot = r[otIdx];
+    if (typeof ot === 'number') otSum += ot;
   });
 
-  renderStats(filteredRows.length, missingClockOut, errorRows, sum, sumCount);
+  renderStats(filteredRows.length, missingClockOut, errorRows, sum, sumCount, otSum);
   renderTable(currentHeader, filteredRows);
 }
 
-function renderStats(total, missing, errorRows, sum, sumCount){
+function renderStats(total, missing, errorRows, sum, sumCount, otSum){
   const avg = sumCount ? (sum/sumCount) : 0;
   statsEl.innerHTML = `
     <div class="stat"><div class="n">${total}</div><div class="l">対象件数</div></div>
     <div class="stat"><div class="n">${sum.toFixed(2)}</div><div class="l">合計稼働時間</div></div>
     <div class="stat"><div class="n">${avg.toFixed(2)}</div><div class="l">平均稼働時間</div></div>
+    <div class="stat"><div class="n" style="color:${otSum? '#b91c1c':'inherit'}">${otSum.toFixed(2)}</div><div class="l">合計残業時間</div></div>
     <div class="stat"><div class="n" style="color:${missing? 'var(--warn)':'inherit'}">${missing}</div><div class="l">打刻漏れ件数</div></div>
     <div class="stat"><div class="n" style="color:${errorRows? 'var(--err)':'inherit'}">${errorRows}</div><div class="l">エラー件数</div></div>
   `;
@@ -458,18 +499,22 @@ function renderTable(header, rows){
     wrap0.innerHTML = '<div class="empty-note">条件に一致するデータがありません。</div>';
     return;
   }
+  const workIdx = header.length - 2;
+  const otIdx = header.length - 1;
   let html = '<thead><tr>';
   header.forEach((h,i) => {
-    html += `<th${i===header.length-1?' class="j-col"':''}>${escapeHtml(h)}</th>`;
+    const cls = i===workIdx ? ' class="j-col"' : (i===otIdx ? ' class="ot-col"' : '');
+    html += `<th${cls}>${escapeHtml(h)}</th>`;
   });
   html += '</tr></thead><tbody>';
   rows.forEach(r => {
     html += '<tr>';
     r.forEach((c,i) => {
-      const isLast = i === header.length-1;
-      let cls = isLast ? ' class="j-col' : ' class="';
-      if (isLast && c === '打刻漏れ') cls += ' flag-warn';
-      if (isLast && c === 'エラー') cls += ' flag-error';
+      const isWork = i === workIdx;
+      const isOt = i === otIdx;
+      let cls = isWork ? ' class="j-col' : (isOt ? ' class="ot-col' : ' class="');
+      if ((isWork || isOt) && c === '打刻漏れ') cls += ' flag-warn';
+      if ((isWork || isOt) && c === 'エラー') cls += ' flag-error';
       cls += '"';
       html += `<td${cls}>${escapeHtml(c===undefined?'':c)}</td>`;
     });
