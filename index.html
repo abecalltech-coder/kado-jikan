@@ -7,6 +7,7 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <style>
   :root{
+    color-scheme: light;
     --main:#2563eb; --main-dark:#1d4ed8; --bg:#f4f6fb; --card:#ffffff;
     --border:#e2e8f0; --text:#1e293b; --sub:#64748b; --err:#dc2626; --warn:#d97706; --ok:#16a34a;
   }
@@ -39,10 +40,18 @@
   .msg{padding:10px 14px;border-radius:8px;font-size:13px;margin-top:14px;display:none;}
   .msg.error{background:#fef2f2;color:var(--err);border:1px solid #fecaca;display:block;}
   .msg.ok{background:#f0fdf4;color:var(--ok);border:1px solid #bbf7d0;display:block;}
-  .stats{display:flex;gap:14px;flex-wrap:wrap;margin-bottom:6px;}
+  .stats{display:flex;gap:14px;flex-wrap:wrap;margin-bottom:14px;}
   .stat{background:#f8fafc;border:1px solid var(--border);border-radius:10px;padding:10px 16px;min-width:130px;}
   .stat .n{font-size:20px;font-weight:700;color:var(--main-dark);}
   .stat .l{font-size:11px;color:var(--sub);}
+  .filters{display:flex;gap:14px;flex-wrap:wrap;align-items:flex-end;margin-bottom:16px;padding:14px;background:#f8fafc;border:1px solid var(--border);border-radius:10px;}
+  .filter-item{display:flex;flex-direction:column;gap:4px;min-width:160px;}
+  .filter-item label{font-size:11px;color:var(--sub);font-weight:600;}
+  .filter-item select, .filter-item input[type=text]{
+    padding:7px 10px;border:1px solid var(--border);border-radius:8px;font-size:13px;background:#fff;color:var(--text);
+    font-family:inherit;
+  }
+  .filter-item select:focus, .filter-item input[type=text]:focus{outline:2px solid #bfdbfe;border-color:var(--main);}
   table{border-collapse:collapse;width:100%;font-size:12.5px;}
   th,td{border:1px solid var(--border);padding:6px 9px;text-align:left;white-space:nowrap;}
   th{background:#eef2ff;position:sticky;top:0;font-weight:700;}
@@ -52,7 +61,8 @@
   .flag-error{color:var(--err);font-weight:700;}
   .flag-warn{color:var(--warn);font-weight:700;}
   .hint{font-size:12px;color:var(--sub);margin-top:8px;line-height:1.6;}
-  .badge{display:inline-block;background:#eef2ff;color:var(--main-dark);border-radius:6px;padding:2px 8px;font-size:11px;margin-left:6px;}
+  .empty-note{padding:20px;text-align:center;color:var(--sub);font-size:13px;}
+  footer{font-size:11px;color:var(--sub);text-align:center;margin-top:10px;}
 </style>
 </head>
 <body>
@@ -78,14 +88,32 @@
 
   <div class="card" id="resultCard" style="display:none;">
     <div class="stats" id="stats"></div>
+
+    <div class="filters" id="filters">
+      <div class="filter-item">
+        <label for="filterDate">日付</label>
+        <select id="filterDate"><option value="">すべて</option></select>
+      </div>
+      <div class="filter-item">
+        <label for="filterName">氏名</label>
+        <input type="text" id="filterName" placeholder="氏名で検索">
+      </div>
+      <div class="filter-item">
+        <label for="filterCompany">所属会社</label>
+        <select id="filterCompany"><option value="">すべて</option></select>
+      </div>
+      <button type="button" id="resetFilters" class="secondary">フィルタ解除</button>
+    </div>
+
     <div class="actions" style="margin-top:0;margin-bottom:14px;">
-      <button id="downloadCsv">CSVでダウンロード</button>
-      <button id="downloadXlsx" class="secondary">Excelでダウンロード(.xlsx)</button>
+      <button id="downloadCsv">表示中の内容をCSVでダウンロード</button>
+      <button id="downloadXlsx" class="secondary">表示中の内容をExcelでダウンロード(.xlsx)</button>
     </div>
     <div class="tablewrap">
       <table id="resultTable"></table>
     </div>
   </div>
+  <footer>ファイルはこの画面内だけで処理され、外部には送信されません。</footer>
 </div>
 
 <script>
@@ -98,8 +126,15 @@ const statsEl = document.getElementById('stats');
 const tableEl = document.getElementById('resultTable');
 const downloadCsvBtn = document.getElementById('downloadCsv');
 const downloadXlsxBtn = document.getElementById('downloadXlsx');
+const filterDateEl = document.getElementById('filterDate');
+const filterNameEl = document.getElementById('filterName');
+const filterCompanyEl = document.getElementById('filterCompany');
+const resetFiltersBtn = document.getElementById('resetFilters');
 
-let processedAoa = null; // header + rows, J column already appended
+let currentHeader = null;   // ヘッダー配列(稼働時間列を含む)
+let allRows = [];           // インポートした全行(フィルタ前)
+let filteredRows = [];      // 現在表示中(フィルタ後)の行
+let colIdx = {};            // 列名 -> インデックス
 let sourceFileBaseName = 'result';
 
 pickBtn.addEventListener('click', () => fileInput.click());
@@ -118,6 +153,16 @@ dropEl.addEventListener('drop', e => {
 dropEl.addEventListener('click', (e) => {
   if (e.target === pickBtn) return;
   fileInput.click();
+});
+
+filterDateEl.addEventListener('change', applyFilters);
+filterCompanyEl.addEventListener('change', applyFilters);
+filterNameEl.addEventListener('input', applyFilters);
+resetFiltersBtn.addEventListener('click', () => {
+  filterDateEl.value = '';
+  filterCompanyEl.value = '';
+  filterNameEl.value = '';
+  applyFilters();
 });
 
 function showMsg(text, type){
@@ -141,7 +186,7 @@ async function handleFile(file){
       aoa = parseCSV(text);
     } else if (ext === 'xlsx' || ext === 'xls'){
       if (typeof XLSX === 'undefined'){
-        showMsg('Excelファイルの読み込みには通信環境が必要です（初回のみライブラリを読み込みます）。時間をおいて再度お試しください。', 'error');
+        showMsg('Excelファイルの読み込みには通信環境が必要です。時間をおいて再度お試しください。', 'error');
         return;
       }
       const buf = await file.arrayBuffer();
@@ -169,7 +214,6 @@ async function handleFile(file){
       return;
     }
 
-    let missingClockOut = 0, errorRows = 0, sum = 0, sumCount = 0;
     const outRows = aoa.slice(1).map(row => {
       const get = name => (row[idx[name]] !== undefined ? String(row[idx[name]]).trim() : '');
       const start = parseTimeToMinutes(get('出勤時間'));
@@ -181,7 +225,7 @@ async function handleFile(file){
       if (start === null){
         j = '';
       } else if (end === null){
-        j = '打刻漏れ'; missingClockOut++;
+        j = '打刻漏れ';
       } else {
         let total = end - start;
         if (total < 0) total += 1440;
@@ -190,16 +234,15 @@ async function handleFile(file){
           brk = bIn - bOut;
           if (brk < 0) brk += 1440;
         } else if (bOut !== null || bIn !== null){
-          j = '打刻漏れ'; missingClockOut++;
+          j = '打刻漏れ';
         }
         if (j === undefined){
           const workMin = total - brk;
           if (workMin < 0){
-            j = 'エラー'; errorRows++;
+            j = 'エラー';
           } else {
             const dec = Math.round((workMin/60)*100)/100;
             j = Number(dec.toFixed(2));
-            sum += dec; sumCount++;
           }
         }
       }
@@ -211,16 +254,85 @@ async function handleFile(file){
 
     const newHeader = header.slice();
     newHeader.push('稼働時間');
-    processedAoa = [newHeader, ...outRows];
 
-    renderStats(outRows.length, missingClockOut, errorRows, sum, sumCount);
-    renderTable(newHeader, outRows);
+    currentHeader = newHeader;
+    allRows = outRows;
+    colIdx = {};
+    newHeader.forEach((h,i) => colIdx[h] = i);
+
+    populateFilterOptions();
+    filterNameEl.value = '';
+    filterDateEl.value = '';
+    filterCompanyEl.value = '';
+    applyFilters();
+
     resultCard.style.display = 'block';
     showMsg('取り込み完了：' + outRows.length + ' 件を計算しました。', 'ok');
   } catch(err){
     console.error(err);
     showMsg('読み込み中にエラーが発生しました: ' + err.message, 'error');
   }
+}
+
+function dateSortKey(s){
+  const m = String(s).match(/^(\d+)\D+(\d+)\D+(\d+)/);
+  if (!m) return s;
+  return parseInt(m[1],10)*10000 + parseInt(m[2],10)*100 + parseInt(m[3],10);
+}
+
+function populateFilterOptions(){
+  const dateIdx = colIdx['日付'];
+  const companyIdx = colIdx['所属会社'];
+
+  if (dateIdx !== undefined){
+    const dates = Array.from(new Set(allRows.map(r => String(r[dateIdx]||'').trim()).filter(v=>v!=='')));
+    dates.sort((a,b) => dateSortKey(b) - dateSortKey(a));
+    filterDateEl.innerHTML = '<option value="">すべて</option>' + dates.map(d => `<option value="${escapeHtml(d)}">${escapeHtml(d)}</option>`).join('');
+    filterDateEl.parentElement.style.display = '';
+  } else {
+    filterDateEl.parentElement.style.display = 'none';
+  }
+
+  if (companyIdx !== undefined){
+    const companies = Array.from(new Set(allRows.map(r => String(r[companyIdx]||'').trim()).filter(v=>v!=='')));
+    companies.sort((a,b) => a.localeCompare(b, 'ja'));
+    filterCompanyEl.innerHTML = '<option value="">すべて</option>' + companies.map(c => `<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join('');
+    filterCompanyEl.parentElement.style.display = '';
+  } else {
+    filterCompanyEl.parentElement.style.display = 'none';
+  }
+
+  filterNameEl.parentElement.style.display = (colIdx['氏名'] !== undefined) ? '' : 'none';
+}
+
+function applyFilters(){
+  if (!currentHeader) return;
+  const dateIdx = colIdx['日付'];
+  const nameIdx = colIdx['氏名'];
+  const companyIdx = colIdx['所属会社'];
+
+  const dateVal = filterDateEl.value;
+  const nameVal = filterNameEl.value.trim().toLowerCase();
+  const companyVal = filterCompanyEl.value;
+
+  filteredRows = allRows.filter(row => {
+    if (dateVal && dateIdx !== undefined && String(row[dateIdx]||'').trim() !== dateVal) return false;
+    if (companyVal && companyIdx !== undefined && String(row[companyIdx]||'').trim() !== companyVal) return false;
+    if (nameVal && nameIdx !== undefined && !String(row[nameIdx]||'').toLowerCase().includes(nameVal)) return false;
+    return true;
+  });
+
+  let missingClockOut = 0, errorRows = 0, sum = 0, sumCount = 0;
+  const jIdx = currentHeader.length - 1;
+  filteredRows.forEach(r => {
+    const v = r[jIdx];
+    if (v === '打刻漏れ') missingClockOut++;
+    else if (v === 'エラー') errorRows++;
+    else if (typeof v === 'number'){ sum += v; sumCount++; }
+  });
+
+  renderStats(filteredRows.length, missingClockOut, errorRows, sum, sumCount);
+  renderTable(currentHeader, filteredRows);
 }
 
 function renderStats(total, missing, errorRows, sum, sumCount){
@@ -235,6 +347,11 @@ function renderStats(total, missing, errorRows, sum, sumCount){
 }
 
 function renderTable(header, rows){
+  const wrap0 = document.querySelector('.tablewrap');
+  if (rows.length === 0){
+    wrap0.innerHTML = '<div class="empty-note">条件に一致するデータがありません。</div>';
+    return;
+  }
   let html = '<thead><tr>';
   header.forEach((h,i) => {
     html += `<th${i===header.length-1?' class="j-col"':''}>${escapeHtml(h)}</th>`;
@@ -253,7 +370,10 @@ function renderTable(header, rows){
     html += '</tr>';
   });
   html += '</tbody>';
-  tableEl.innerHTML = html;
+
+  const wrap = document.querySelector('.tablewrap');
+  wrap.innerHTML = '<table id="resultTable"></table>';
+  document.getElementById('resultTable').innerHTML = html;
 }
 
 function escapeHtml(v){
@@ -264,7 +384,6 @@ function parseTimeToMinutes(str){
   if (str === null || str === undefined) return null;
   str = String(str).trim();
   if (str === '') return null;
-  // Excelのシリアル値(0〜1の小数)が文字列で来た場合
   if (/^0?\.\d+$/.test(str)){
     return Math.round(parseFloat(str) * 24 * 60);
   }
@@ -314,19 +433,21 @@ function toCsvValue(v){
 }
 
 downloadCsvBtn.addEventListener('click', () => {
-  if (!processedAoa) return;
-  const csv = processedAoa.map(r => r.map(toCsvValue).join(',')).join('\r\n');
+  if (!currentHeader || filteredRows.length === 0) return;
+  const aoa = [currentHeader, ...filteredRows];
+  const csv = aoa.map(r => r.map(toCsvValue).join(',')).join('\r\n');
   const blob = new Blob(['﻿' + csv], {type:'text/csv;charset=utf-8;'});
   triggerDownload(blob, sourceFileBaseName + '_稼働時間計算済.csv');
 });
 
 downloadXlsxBtn.addEventListener('click', () => {
-  if (!processedAoa) return;
+  if (!currentHeader || filteredRows.length === 0) return;
   if (typeof XLSX === 'undefined'){
     showMsg('Excel出力には通信環境が必要です。CSVでダウンロードをご利用ください。', 'error');
     return;
   }
-  const ws = XLSX.utils.aoa_to_sheet(processedAoa);
+  const aoa = [currentHeader, ...filteredRows];
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, 'data');
   XLSX.writeFile(wb, sourceFileBaseName + '_稼働時間計算済.xlsx');
