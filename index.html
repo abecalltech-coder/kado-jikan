@@ -103,6 +103,7 @@
     <div id="msg" class="msg"></div>
     <div class="hint">
       必要な列: 出勤時間・退勤時間・中抜時間・戻り時間（列名で自動検出するため順番が変わっても大丈夫です）<br>
+      出勤時間・退勤時間は15分単位に丸めて計算します（出勤は繰り上げ 例:10:18→10:30、退勤は繰り下げ 例:19:14→19:00）。<br>
       稼働時間: 10:00より前の出勤は10:00扱い、19:00より後の退勤は19:00扱いで計算します。中抜け時間を差し引き、休憩時間(13:00〜14:00)に稼働している場合はさらに1時間差し引きます。<br>
       残業時間: 19:00以降に打刻された時間を、稼働時間の右の列に別途表示します。<br>
       退勤時間が未入力の行は「打刻漏れ」と表示します。<br>
@@ -314,10 +315,13 @@ async function handleFile(file){
 
     const outRows = aoa.slice(1).map(row => {
       const get = name => (row[idx[name]] !== undefined ? String(row[idx[name]]).trim() : '');
-      const start = parseTimeToMinutes(get('出勤時間'));
-      const end = parseTimeToMinutes(get('退勤時間'));
+      const rawStart = parseTimeToMinutes(get('出勤時間'));
+      const rawEnd = parseTimeToMinutes(get('退勤時間'));
       const bOut = parseTimeToMinutes(get('中抜時間'));
       const bIn = parseTimeToMinutes(get('戻り時間'));
+
+      const start = rawStart === null ? null : ceilToQuarter(rawStart);
+      const end = rawEnd === null ? null : floorToQuarter(rawEnd);
 
       const { work, overtime } = computeWorkAndOvertime(start, end, bOut, bIn);
 
@@ -355,6 +359,14 @@ const MORNING_CUTOFF = 600;   // 10:00 これより前の出勤は10:00扱い
 const EVENING_CUTOFF = 1140;  // 19:00 これより後の退勤は19:00扱い(超過分は残業時間)
 const LUNCH_START = 780;      // 13:00
 const LUNCH_END = 840;        // 14:00
+
+function ceilToQuarter(minutes){
+  return Math.ceil(minutes / 15) * 15;
+}
+
+function floorToQuarter(minutes){
+  return Math.floor(minutes / 15) * 15;
+}
 
 function toDecimalHours(minutes){
   return Number((Math.round((minutes/60)*100)/100).toFixed(2));
