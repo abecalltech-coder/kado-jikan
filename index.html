@@ -85,6 +85,8 @@
   .hint{font-size:12px;color:var(--sub);margin-top:8px;line-height:1.6;}
   .empty-note{padding:20px;text-align:center;color:var(--sub);font-size:13px;}
   footer{font-size:11px;color:var(--sub);text-align:center;margin-top:10px;}
+  .reqnames-toggle{display:flex;align-items:center;justify-content:space-between;cursor:pointer;}
+  .reqnames-card textarea{width:100%;min-height:160px;font-family:inherit;font-size:12.5px;padding:8px;border:1px solid var(--border);border-radius:8px;resize:vertical;line-height:1.6;}
 </style>
 </head>
 <body>
@@ -107,7 +109,26 @@
       稼働時間: 10:00より前の出勤は10:00扱い、19:00より後の退勤は19:00扱いで計算します。中抜け時間を差し引き、休憩時間(13:00〜14:00)に稼働している場合はさらに1時間差し引きます。<br>
       残業時間: 19:00以降に打刻された時間を、稼働時間の右の列に別途表示します。<br>
       退勤時間が未入力の行は「打刻漏れ」と表示します。<br>
-      稼働時間が8時間未満の行は薄い赤色で表示します。
+      稼働時間が8時間未満の行は薄い赤色で表示します。<br>
+      「必須氏名リスト」に登録した氏名は、データの有無にかかわらず必ず一覧に表示されます（出勤時間が空欄の場合は赤色で表示）。
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="reqnames-toggle" id="reqNamesToggle">
+      <strong style="font-size:14px;">必須氏名リストの管理</strong>
+      <button type="button" id="reqNamesToggleBtn" class="secondary">開く / 閉じる</button>
+    </div>
+    <div id="reqNamesBody" class="reqnames-card" style="display:none;margin-top:12px;">
+      <div class="hint" style="margin-top:0;">
+        ここに登録した氏名は、取り込んだデータの有無にかかわらず必ず一覧に表示されます（未出勤・打刻なしの場合は赤色で表示）。<br>
+        表の表示順もこの並び順になります。1行に1名ずつ入力し、「保存」を押すと反映されます。
+      </div>
+      <textarea id="reqNamesTextarea"></textarea>
+      <div class="actions" style="margin-top:10px;">
+        <button type="button" id="saveReqNamesBtn">保存</button>
+        <button type="button" id="resetReqNamesBtn" class="secondary">デフォルトに戻す</button>
+      </div>
     </div>
   </div>
 
@@ -168,14 +189,160 @@ const nameFilterSearch = document.getElementById('nameFilterSearch');
 const nameSelectAllBtn = document.getElementById('nameSelectAll');
 const nameSelectNoneBtn = document.getElementById('nameSelectNone');
 const nameCheckboxList = document.getElementById('nameCheckboxList');
+const reqNamesToggleBtn = document.getElementById('reqNamesToggleBtn');
+const reqNamesToggle = document.getElementById('reqNamesToggle');
+const reqNamesBody = document.getElementById('reqNamesBody');
+const reqNamesTextarea = document.getElementById('reqNamesTextarea');
+const saveReqNamesBtn = document.getElementById('saveReqNamesBtn');
+const resetReqNamesBtn = document.getElementById('resetReqNamesBtn');
 
 let currentHeader = null;   // ヘッダー配列(稼働時間列を含む)
-let allRows = [];           // インポートした全行(フィルタ前)
+let allRows = [];           // インポートした全行(フィルタ前、必須氏名反映済み)
 let filteredRows = [];      // 現在表示中(フィルタ後)の行
 let colIdx = {};            // 列名 -> インデックス
 let sourceFileBaseName = 'result';
 let allNames = [];          // インポートした全氏名(重複なし)
 let selectedNames = new Set(); // 選択中の氏名(空 = 全員)
+
+// 必須氏名リスト機能 -------------------------------------------------
+const DEFAULT_REQUIRED_NAMES = [
+  '神代悠一','大野裕幸','河合絵璃香','髙木広翔','小野大輝','河手碧','浅田竜平','松﨑優輝',
+  '日塔勝','関谷柊兵','柿田慎一','太田菜々香','谷地優輝','阿部航大','揚石梨斗','福田亘希',
+  '石川海','本田瑞季','中田善隆','加地琴葉','小松ふみる','上原康暉','中山優花','池田二千翔',
+  '白石顕章','内山龍','山下弥瀬'
+];
+const REQUIRED_NAMES_KEY = 'kadoJikanRequiredNames';
+
+function loadRequiredNames(){
+  try{
+    const raw = localStorage.getItem(REQUIRED_NAMES_KEY);
+    if (raw){
+      const arr = JSON.parse(raw);
+      if (Array.isArray(arr)) return arr;
+    }
+  } catch(e){}
+  return DEFAULT_REQUIRED_NAMES.slice();
+}
+
+function saveRequiredNamesToStorage(list){
+  try{ localStorage.setItem(REQUIRED_NAMES_KEY, JSON.stringify(list)); } catch(e){}
+}
+
+let requiredNames = loadRequiredNames();
+
+// ファイル取り込み直後の生データ(必須氏名反映前)。必須氏名リストを変更した際に再構築するために保持。
+let lastRawOutRows = null;
+let lastRawHeader = null;
+let lastRawIdx = null;
+
+function renderReqNamesTextarea(){
+  reqNamesTextarea.value = requiredNames.join('\n');
+}
+renderReqNamesTextarea();
+
+reqNamesToggle.addEventListener('click', () => {
+  reqNamesBody.style.display = (reqNamesBody.style.display === 'none') ? 'block' : 'none';
+});
+reqNamesToggleBtn.addEventListener('click', (e) => {
+  e.stopPropagation();
+  reqNamesBody.style.display = (reqNamesBody.style.display === 'none') ? 'block' : 'none';
+});
+
+saveReqNamesBtn.addEventListener('click', () => {
+  const lines = reqNamesTextarea.value.split('\n').map(s => s.trim()).filter(s => s !== '');
+  const seen = new Set();
+  const dedup = [];
+  lines.forEach(n => { if (!seen.has(n)){ seen.add(n); dedup.push(n); } });
+  requiredNames = dedup;
+  saveRequiredNamesToStorage(requiredNames);
+  renderReqNamesTextarea();
+  if (lastRawOutRows){
+    rebuildFromRaw();
+    showMsg('必須氏名リストを保存し、表を更新しました。', 'ok');
+  } else {
+    showMsg('必須氏名リストを保存しました。', 'ok');
+  }
+});
+
+resetReqNamesBtn.addEventListener('click', () => {
+  requiredNames = DEFAULT_REQUIRED_NAMES.slice();
+  saveRequiredNamesToStorage(requiredNames);
+  renderReqNamesTextarea();
+  if (lastRawOutRows){
+    rebuildFromRaw();
+    showMsg('必須氏名リストをデフォルトに戻し、表を更新しました。', 'ok');
+  } else {
+    showMsg('必須氏名リストをデフォルトに戻しました。', 'ok');
+  }
+});
+
+function buildRequiredRows(header, idx, sourceRows, names){
+  const dateColIdx = idx['日付'];
+  const nameColIdx = idx['氏名'];
+  if (dateColIdx === undefined || nameColIdx === undefined || !names || names.length === 0){
+    return sourceRows.slice();
+  }
+
+  // 氏名 -> 所属情報(スタッフ番号/所属会社/事業部など、時刻以外の列)を他の行から補完するための辞書
+  const infoCols = Object.keys(idx).filter(h => !['日付','出勤時間','退勤時間','中抜時間','戻り時間','稼働時間','残業時間'].includes(h));
+  const nameInfo = {};
+  sourceRows.forEach(row => {
+    const nm = String(row[nameColIdx] || '').trim();
+    if (nm === '' || nameInfo[nm]) return;
+    const info = {};
+    infoCols.forEach(h => { info[idx[h]] = row[idx[h]]; });
+    nameInfo[nm] = info;
+  });
+
+  const byDate = new Map();
+  const dateOrder = [];
+  sourceRows.forEach(row => {
+    const d = String(row[dateColIdx] || '').trim();
+    if (!byDate.has(d)){ byDate.set(d, []); dateOrder.push(d); }
+    byDate.get(d).push(row);
+  });
+  dateOrder.sort((a,b) => dateSortKey(a) - dateSortKey(b));
+
+  const result = [];
+  dateOrder.forEach(d => {
+    const rowsForDate = byDate.get(d);
+    const used = new Set();
+    names.forEach(nm => {
+      const foundIndex = rowsForDate.findIndex((r,i) => !used.has(i) && String(r[nameColIdx] || '').trim() === nm);
+      if (foundIndex !== -1){
+        used.add(foundIndex);
+        result.push(rowsForDate[foundIndex]);
+      } else {
+        const blank = new Array(header.length).fill('');
+        blank[dateColIdx] = d;
+        blank[nameColIdx] = nm;
+        const info = nameInfo[nm];
+        if (info){
+          Object.keys(info).forEach(colIndex => { blank[colIndex] = info[colIndex]; });
+        }
+        result.push(blank);
+      }
+    });
+    rowsForDate.forEach((r,i) => { if (!used.has(i)) result.push(r); });
+  });
+  return result;
+}
+
+function rebuildFromRaw(){
+  if (!lastRawOutRows) return;
+  const finalRows = buildRequiredRows(lastRawHeader, lastRawIdx, lastRawOutRows, requiredNames);
+  currentHeader = lastRawHeader;
+  allRows = finalRows;
+  colIdx = {};
+  lastRawHeader.forEach((h,i) => colIdx[h] = i);
+
+  populateFilterOptions();
+  filterDateEl.value = '';
+  filterCompanyEl.value = '';
+  nameFilterPanel.style.display = 'none';
+  applyFilters();
+  resultCard.style.display = 'block';
+}
 
 pickBtn.addEventListener('click', () => fileInput.click());
 fileInput.addEventListener('change', e => { if(e.target.files[0]) handleFile(e.target.files[0]); });
@@ -336,8 +503,12 @@ async function handleFile(file){
     newHeader.push('稼働時間');
     newHeader.push('残業時間');
 
+    lastRawOutRows = outRows;
+    lastRawHeader = newHeader;
+    lastRawIdx = idx;
+
     currentHeader = newHeader;
-    allRows = outRows;
+    allRows = buildRequiredRows(newHeader, idx, outRows, requiredNames);
     colIdx = {};
     newHeader.forEach((h,i) => colIdx[h] = i);
 
@@ -348,7 +519,7 @@ async function handleFile(file){
     applyFilters();
 
     resultCard.style.display = 'block';
-    showMsg('取り込み完了：' + outRows.length + ' 件を計算しました。', 'ok');
+    showMsg('取り込み完了：' + outRows.length + ' 件を計算しました（必須氏名リストの反映後は ' + allRows.length + ' 件を表示）。', 'ok');
   } catch(err){
     console.error(err);
     showMsg('読み込み中にエラーが発生しました: ' + err.message, 'error');
@@ -515,6 +686,7 @@ function renderTable(header, rows){
   }
   const workIdx = header.length - 2;
   const otIdx = header.length - 1;
+  const startIdx = colIdx['出勤時間'];
   let html = '<thead><tr>';
   header.forEach((h,i) => {
     const cls = i===workIdx ? ' class="j-col"' : (i===otIdx ? ' class="ot-col"' : '');
@@ -524,7 +696,9 @@ function renderTable(header, rows){
   rows.forEach(r => {
     const workVal = r[workIdx];
     const isUnder8 = typeof workVal === 'number' && workVal < 8;
-    html += `<tr${isUnder8 ? ' class="under8"' : ''}>`;
+    const isStartMissing = startIdx !== undefined && String(r[startIdx] || '').trim() === '';
+    const highlight = isUnder8 || isStartMissing;
+    html += `<tr${highlight ? ' class="under8"' : ''}>`;
     r.forEach((c,i) => {
       const isWork = i === workIdx;
       const isOt = i === otIdx;
