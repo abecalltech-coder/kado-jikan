@@ -889,4 +889,39 @@ function personSheetOrder(mode){
   return { byName, order };
 }
 
-downloadXlsxBtn.addEventListen
+downloadXlsxBtn.addEventListener('click', () => {
+  if (!currentHeader || filteredRows.length === 0) return;
+  if (typeof XLSX === 'undefined'){
+    showMsg('Excel出力には通信環境が必要です。CSVでダウンロードをご利用ください。', 'error');
+    return;
+  }
+
+  const mode = excelSplitModeEl.value;
+  const wb = XLSX.utils.book_new();
+
+  function addSheet(sheetLabel, rows){
+    const aoa = [currentHeader, ...withPersonTotals(rows)];
+    const ws = XLSX.utils.aoa_to_sheet(aoa);
+    XLSX.utils.book_append_sheet(wb, ws, uniqueSheetName(wb, sheetLabel));
+  }
+
+  const grouped = personSheetOrder(mode);
+  if (grouped){
+    grouped.order.forEach(nm => addSheet(nm, grouped.byName.get(nm)));
+  } else {
+    addSheet('全体', filteredRows);
+  }
+
+  XLSX.writeFile(wb, sourceFileBaseName + '_稼働時間計算済.xlsx');
+});
+
+function triggerDownload(blob, filename){
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+</script>
+</body>
+</html>
