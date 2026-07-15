@@ -164,15 +164,15 @@
       <div class="filter-item" style="min-width:200px;">
         <label for="excelSplitMode">Excel抽出単位</label>
         <select id="excelSplitMode">
-          <option value="all">全体（1シート）</option>
-          <option value="company">所属会社別（会社ごとにシート分け）</option>
-          <option value="name">氏名別（氏名ごとにシート分け）</option>
+          <option value="all">全体（並び順のまま・氏名ごとに1シート）</option>
+          <option value="company">所属会社別（会社ごとにまとめて・氏名ごとに1シート）</option>
+          <option value="name">氏名別（五十音順・氏名ごとに1シート）</option>
         </select>
       </div>
       <button id="downloadXlsx" class="secondary">表示中の内容をExcelでダウンロード(.xlsx)</button>
     </div>
     <div class="hint" style="margin-top:0;margin-bottom:14px;">
-      Excel抽出時は、上のフィルタ（日付・氏名・所属会社）で絞り込んだ内容が対象になります。各人員の行の一番下には「累計」行（稼働時間・残業時間の合計）が自動で入ります。
+      Excel抽出時は、上のフィルタ（日付・氏名・所属会社）で絞り込んだ内容が対象になります。抽出単位に関わらず、常に氏名ごとに1シートに分かれ、各シートの一番下には「累計」行（稼働時間・残業時間の合計）が自動で入ります。抽出単位の違いはシートの並び順（そのまま／会社ごとにまとめる／五十音順）のみです。
     </div>
     <div class="tablewrap">
       <table id="resultTable"></table>
@@ -846,56 +846,47 @@ function withPersonTotals(rows){
   return out;
 }
 
-downloadXlsxBtn.addEventListener('click', () => {
-  if (!currentHeader || filteredRows.length === 0) return;
-  if (typeof XLSX === 'undefined'){
-    showMsg('Excel出力には通信環境が必要です。CSVでダウンロードをご利用ください。', 'error');
-    return;
-  }
-
-  const mode = excelSplitModeEl.value;
+function personSheetOrder(mode){
   const nameIdx = colIdx['氏名'];
   const companyIdx = colIdx['所属会社'];
-  const wb = XLSX.utils.book_new();
+  if (nameIdx === undefined) return null;
 
-  function addSheet(sheetLabel, rows){
-    const aoa = [currentHeader, ...withPersonTotals(rows)];
-    const ws = XLSX.utils.aoa_to_sheet(aoa);
-    XLSX.utils.book_append_sheet(wb, ws, uniqueSheetName(wb, sheetLabel));
-  }
+  const byName = new Map();
+  const firstSeenOrder = [];
+  filteredRows.forEach(r => {
+    const nm = String(r[nameIdx] || '').trim() || '(氏名不明)';
+    if (!byName.has(nm)){ byName.set(nm, []); firstSeenOrder.push(nm); }
+    byName.get(nm).push(r);
+  });
 
-  if (mode === 'name' && nameIdx !== undefined){
-    const byName = new Map();
-    const order = [];
-    filteredRows.forEach(r => {
-      const nm = String(r[nameIdx] || '').trim() || '(氏名不明)';
-      if (!byName.has(nm)){ byName.set(nm, []); order.push(nm); }
-      byName.get(nm).push(r);
-    });
-    order.forEach(nm => addSheet(nm, byName.get(nm)));
+  let order;
+  if (mode === 'name'){
+    // 氏名別: 五十音順(氏名でソート)
+    order = firstSeenOrder.slice().sort((a,b) => a.localeCompare(b, 'ja'));
   } else if (mode === 'company' && companyIdx !== undefined){
-    const byCompany = new Map();
-    const order = [];
-    filteredRows.forEach(r => {
-      const c = String(r[companyIdx] || '').trim() || '(所属会社不明)';
-      if (!byCompany.has(c)){ byCompany.set(c, []); order.push(c); }
-      byCompany.get(c).push(r);
+    // 所属会社別: 会社ごとにまとめて隣接させる(会社・氏名とも初出順)
+    const personCompany = new Map();
+    firstSeenOrder.forEach(nm => {
+      const rows = byName.get(nm);
+      const withCompany = rows.find(r => String(r[companyIdx] || '').trim() !== '');
+      personCompany.set(nm, withCompany ? String(withCompany[companyIdx]).trim() : '(所属会社不明)');
     });
-    order.forEach(c => addSheet(c, byCompany.get(c)));
+    const companyOrder = [];
+    const seenCompanies = new Set();
+    firstSeenOrder.forEach(nm => {
+      const c = personCompany.get(nm);
+      if (!seenCompanies.has(c)){ seenCompanies.add(c); companyOrder.push(c); }
+    });
+    order = [];
+    companyOrder.forEach(c => {
+      firstSeenOrder.forEach(nm => { if (personCompany.get(nm) === c) order.push(nm); });
+    });
   } else {
-    addSheet('全体', filteredRows);
+    // 全体: データの並び順のまま
+    order = firstSeenOrder;
   }
 
-  XLSX.writeFile(wb, sourceFileBaseName + '_稼働時間計算済.xlsx');
-});
-
-function triggerDownload(blob, filename){
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url; a.download = filename;
-  document.body.appendChild(a); a.click(); document.body.removeChild(a);
-  URL.revokeObjectURL(url);
+  return { byName, order };
 }
-</script>
-</body>
-</html>
+
+downloadXlsxBtn.addEventListen
