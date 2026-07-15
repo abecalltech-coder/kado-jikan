@@ -159,9 +159,20 @@
       <button type="button" id="resetFilters" class="secondary">フィルタ解除</button>
     </div>
 
-    <div class="actions" style="margin-top:0;margin-bottom:14px;">
+    <div class="actions" style="margin-top:0;margin-bottom:6px;align-items:flex-end;">
       <button id="downloadCsv">表示中の内容をCSVでダウンロード</button>
+      <div class="filter-item" style="min-width:200px;">
+        <label for="excelSplitMode">Excel抽出単位</label>
+        <select id="excelSplitMode">
+          <option value="all">全体（1シート）</option>
+          <option value="company">所属会社別（会社ごとにシート分け）</option>
+          <option value="name">氏名別（氏名ごとにシート分け）</option>
+        </select>
+      </div>
       <button id="downloadXlsx" class="secondary">表示中の内容をExcelでダウンロード(.xlsx)</button>
+    </div>
+    <div class="hint" style="margin-top:0;margin-bottom:14px;">
+      Excel抽出時は、上のフィルタ（日付・氏名・所属会社）で絞り込んだ内容が対象になります。各人員の行の一番下には「累計」行（稼働時間・残業時間の合計）が自動で入ります。
     </div>
     <div class="tablewrap">
       <table id="resultTable"></table>
@@ -180,6 +191,7 @@ const statsEl = document.getElementById('stats');
 const tableEl = document.getElementById('resultTable');
 const downloadCsvBtn = document.getElementById('downloadCsv');
 const downloadXlsxBtn = document.getElementById('downloadXlsx');
+const excelSplitModeEl = document.getElementById('excelSplitMode');
 const filterDateEl = document.getElementById('filterDate');
 const filterCompanyEl = document.getElementById('filterCompany');
 const resetFiltersBtn = document.getElementById('resetFilters');
@@ -781,16 +793,99 @@ downloadCsvBtn.addEventListener('click', () => {
   triggerDownload(blob, sourceFileBaseName + '_稼働時間計算済.csv');
 });
 
+function sanitizeSheetName(name){
+  let s = String(name || '').replace(/[\\\/\?\*\[\]:]/g, '_').trim();
+  if (s === '') s = 'data';
+  return s.slice(0, 31);
+}
+
+function uniqueSheetName(wb, baseName){
+  let name = sanitizeSheetName(baseName);
+  if (!wb.SheetNames.includes(name)) return name;
+  let n = 2;
+  while (true){
+    const suffix = '_' + n;
+    const candidate = name.slice(0, 31 - suffix.length) + suffix;
+    if (!wb.SheetNames.includes(candidate)) return candidate;
+    n++;
+  }
+}
+
+function withPersonTotals(rows){
+  const nameIdx = colIdx['氏名'];
+  const dateIdx = colIdx['日付'];
+  const workIdx = currentHeader.length - 2;
+  const otIdx = currentHeader.length - 1;
+
+  if (nameIdx === undefined) return rows.slice();
+
+  const groups = new Map();
+  const order = [];
+  rows.forEach(r => {
+    const nm = String(r[nameIdx] || '').trim();
+    if (!groups.has(nm)){ groups.set(nm, []); order.push(nm); }
+    groups.get(nm).push(r);
+  });
+
+  const out = [];
+  order.forEach(nm => {
+    const grp = groups.get(nm);
+    grp.forEach(r => out.push(r));
+    let workSum = 0, otSum = 0;
+    grp.forEach(r => {
+      if (typeof r[workIdx] === 'number') workSum += r[workIdx];
+      if (typeof r[otIdx] === 'number') otSum += r[otIdx];
+    });
+    const totalRow = new Array(currentHeader.length).fill('');
+    if (dateIdx !== undefined) totalRow[dateIdx] = '累計';
+    totalRow[nameIdx] = nm;
+    totalRow[workIdx] = Number(workSum.toFixed(2));
+    totalRow[otIdx] = Number(otSum.toFixed(2));
+    out.push(totalRow);
+  });
+  return out;
+}
+
 downloadXlsxBtn.addEventListener('click', () => {
   if (!currentHeader || filteredRows.length === 0) return;
   if (typeof XLSX === 'undefined'){
     showMsg('Excel出力には通信環境が必要です。CSVでダウンロードをご利用ください。', 'error');
     return;
   }
-  const aoa = [currentHeader, ...filteredRows];
-  const ws = XLSX.utils.aoa_to_sheet(aoa);
+
+  const mode = excelSplitModeEl.value;
+  const nameIdx = colIdx['氏名'];
+  const companyIdx = colIdx['所属会社'];
   const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws, 'data');
+
+  function addSheet(sheetLabel, rows){
+    const aoa = [currentHeader, ...withPersonTotals(rows)];
+    const ws = XLSX.utils.aoa_to_sheet(aoa);
+    XLSX.utils.book_append_sheet(wb, ws, uniqueSheetName(wb, sheetLabel));
+  }
+
+  if (mode === 'name' && nameIdx !== undefined){
+    const byName = new Map();
+    const order = [];
+    filteredRows.forEach(r => {
+      const nm = String(r[nameIdx] || '').trim() || '(氏名不明)';
+      if (!byName.has(nm)){ byName.set(nm, []); order.push(nm); }
+      byName.get(nm).push(r);
+    });
+    order.forEach(nm => addSheet(nm, byName.get(nm)));
+  } else if (mode === 'company' && companyIdx !== undefined){
+    const byCompany = new Map();
+    const order = [];
+    filteredRows.forEach(r => {
+      const c = String(r[companyIdx] || '').trim() || '(所属会社不明)';
+      if (!byCompany.has(c)){ byCompany.set(c, []); order.push(c); }
+      byCompany.get(c).push(r);
+    });
+    order.forEach(c => addSheet(c, byCompany.get(c)));
+  } else {
+    addSheet('全体', filteredRows);
+  }
+
   XLSX.writeFile(wb, sourceFileBaseName + '_稼働時間計算済.xlsx');
 });
 
