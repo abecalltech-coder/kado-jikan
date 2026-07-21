@@ -224,20 +224,31 @@ const DEFAULT_REQUIRED_NAMES = [
   '白石顕章','内山龍','山下弥瀬','小山瞳','岡村遵'
 ];
 const REQUIRED_NAMES_KEY = 'kadoJikanRequiredNames';
+// デフォルトの必須氏名リストを変更するたびにこの番号を上げる。
+// 保存済みのブラウザのlocalStorageがこの番号と一致しない場合は、古い保存内容を無視して新しいデフォルトを使う
+// (氏名リストを手動保存・編集した後は、その内容と一緒にこの番号も保存されるため、以後の変更では上書きされない)
+const REQUIRED_NAMES_VERSION = 2;
+const REQUIRED_NAMES_VERSION_KEY = 'kadoJikanRequiredNamesVersion';
 
 function loadRequiredNames(){
   try{
-    const raw = localStorage.getItem(REQUIRED_NAMES_KEY);
-    if (raw){
-      const arr = JSON.parse(raw);
-      if (Array.isArray(arr)) return arr;
+    const storedVersion = localStorage.getItem(REQUIRED_NAMES_VERSION_KEY);
+    if (String(storedVersion) === String(REQUIRED_NAMES_VERSION)){
+      const raw = localStorage.getItem(REQUIRED_NAMES_KEY);
+      if (raw){
+        const arr = JSON.parse(raw);
+        if (Array.isArray(arr)) return arr;
+      }
     }
   } catch(e){}
   return DEFAULT_REQUIRED_NAMES.slice();
 }
 
 function saveRequiredNamesToStorage(list){
-  try{ localStorage.setItem(REQUIRED_NAMES_KEY, JSON.stringify(list)); } catch(e){}
+  try{
+    localStorage.setItem(REQUIRED_NAMES_KEY, JSON.stringify(list));
+    localStorage.setItem(REQUIRED_NAMES_VERSION_KEY, String(REQUIRED_NAMES_VERSION));
+  } catch(e){}
 }
 
 let requiredNames = loadRequiredNames();
